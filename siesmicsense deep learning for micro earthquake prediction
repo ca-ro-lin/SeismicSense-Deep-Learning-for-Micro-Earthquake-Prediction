@@ -1,0 +1,239 @@
+# Cell 1: setup
+!pip install --quiet scikit-learn joblib
+print("Packages installed (scikit-learn, joblib).")
+from google.colab import drive
+drive.mount('/content/drive')
+# then set CSV_PATH to the Drive path, e.g.
+CSV_PATH = "/content/drive/MyDrive/Earthquakes-1990-2023.csv"
+import os
+for root, dirs, files in os.walk('/content/drive/MyDrive'):
+    for f in files:
+        if 'arth' in f:
+            print(os.path.join(root, f))CSV_PATH = "/content/drive/MyDrive/Earthquakes-1990-2023.csv"import pandas as pd
+df = pd.read_csv(CSV_PATH, encoding='utf-8', low_memory=False)  # try latin1/cp1252 if utf-8 fails
+print("Shape:", df.shape)
+print("Columns:", df.columns.tolist())
+df.head(8)
+cols = [c.lower() for c in df.columns]
+def find_col(possibilities):
+    for p in possibilities:
+        if p in cols:
+            return df.columns[cols.index(p)]
+    return None
+
+colmap = {
+  'time': find_col(['time','datetime','date','origintime']),
+  'lat' : find_col(['latitude','lat']),
+  'lon' : find_col(['longitude','lon','lng']),
+  'depth': find_col(['depth','depth_km']),
+  'mag' : find_col(['mag','magnitude','magnitudo','ml','mw'])
+}
+print(colmap)
+import numpy as np
+if colmap['time'] is not None:
+    df['time_parsed'] = pd.to_datetime(df[colmap['time']], errors='coerce')
+else:
+    df['time_parsed'] = pd.NaT
+
+for k, name in [('lat','latitude'), ('lon','longitude'), ('depth','depth'), ('mag','magnitude')]:
+    if colmap[k] is not None:
+        df[name] = pd.to_numeric(df[colmap[k]], errors='coerce')
+    else:
+        df[name] = np.nan
+
+print("Null counts (time, lat, lon, depth, mag):")
+print(df[['time_parsed','latitude','longitude','depth','magnitude']].isnull().sum())
+df_clean = df.dropna(subset=['latitude','longitude','magnitude']).copy()
+print("Rows after drop:", df_clean.shape)
+
+# create year/month/day/hour if time exists
+if df_clean['time_parsed'].notna().sum() > 0:
+    df_clean['year'] = df_clean['time_parsed'].dt.year
+    df_clean['month'] = df_clean['time_parsed'].dt.month
+    df_clean['day'] = df_clean['time_parsed'].dt.day
+    df_clean['hour'] = df_clean['time_parsed'].dt.hour
+else:
+    df_clean['year'] = np.nan
+    df_clean['month'] = np.nan
+    df_clean['hour'] = np.nan
+
+df_clean.head(6)
+FEATURES = ['latitude','longitude','depth','year','month','hour']
+model_df = df_clean[FEATURES + ['magnitude']].dropna()
+print("Rows available:", len(model_df))
+
+SAMPLE_SIZE = 10000   # change to 50000 or more if you have more CPU/RAM
+if len(model_df) > SAMPLE_SIZE:
+    model_df = model_df.sample(n=SAMPLE_SIZE, random_state=42)
+    print("Sampled", SAMPLE_SIZE, "rows for modeling")
+else:
+    print("Using all rows for modeling")
+
+X = model_df[FEATURES].copy()
+y_reg = model_df['magnitude'].copy()
+y_clf = (y_reg >= 4.0).astype(int)   # binary target: 1 if magnitude >= 4.0
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, accuracy_score, precision_score, recall_score, confusion_matrix
+import numpy as np
+
+X_train, X_test, y_train_reg, y_test_reg = train_test_split(X, y_reg, test_size=0.2, random_state=42)
+_, _, y_train_clf, y_test_clf = train_test_split(X, y_clf, test_size=0.2, random_state=42)
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+# small random forest (fast) — increase n_estimators when you have time
+N_EST = 10
+rfr = RandomForestRegressor(n_estimators=N_EST, random_state=42, n_jobs=1)
+rfr.fit(X_train_scaled, y_train_reg)
+y_pred_reg = rfr.predict(X_test_scaled)
+
+rfc = RandomForestClassifier(n_estimators=N_EST, random_state=42, n_jobs=1)
+rfc.fit(X_train_scaled, y_train_clf)
+y_pred_clf = rfc.predict(X_test_scaled)
+
+# print("Regression RMSE:", mean_squared_error(y_test_reg, y_pred_reg, squared=False))
+print("Regression RMSE:", np.sqrt(mean_squared_error(y_test_reg, y_pred_reg)))
+print("Regression R2:", r2_score(y_test_reg, y_pred_reg))
+print("Classification accuracy:", accuracy_score(y_test_clf, y_pred_clf))
+print("Classification precision/recall:", precision_score(y_test_clf, y_pred_clf, zero_division=0), recall_score(y_test_clf, y_pred_clf, zero_division=0))
+print("Confusion matrix:\n", confusion_matrix(y_test_clf, y_pred_clf))import seaborn as sns
+import matplotlib.pyplot as plt
+
+# Step 3: Magnitude Distribution
+plt.figure(figsize=(8,5))
+sns.histplot(df["magnitudo"], bins=50, kde=True)
+plt.title("Distribution of Earthquake Magnitudes")
+plt.xlabel("Magnitude")
+plt.ylabel("Frequency")
+plt.show()# Step 4: Depth vs Magnitude
+plt.figure(figsize=(8,5))
+sns.scatterplot(x="depth", y="magnitudo", data=df.sample(5000))
+plt.title("Depth vs Magnitude")
+plt.xlabel("Depth (km)")
+plt.ylabel("Magnitude")
+plt.show()
+# Step 5: Global earthquake map
+plt.figure(figsize=(10,6))
+plt.scatter(df["longitude"], df["latitude"], c=df["magnitudo"], cmap='inferno', s=1)
+plt.colorbar(label="Magnitude")
+plt.title("Global Earthquake Distribution")
+plt.xlabel("Longitude")
+plt.ylabel("Latitude")
+plt.show()
+# Step 6: Simple Deep Learning Model
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense
+import numpy as np
+
+# ✅ FIX 1: Clean data properly BEFORE using it
+df_clean = df.dropna(subset=["latitude", "longitude", 
+                              "depth", "magnitude"])
+df_clean = df_clean[df_clean["magnitude"] > 0]
+df_clean = df_clean.reset_index(drop=True)
+
+# ✅ FIX 2: Add year and month columns safely
+df_clean["year"] = pd.to_datetime(df_clean["date"], 
+                                   errors='coerce').dt.year
+df_clean["month"] = pd.to_datetime(df_clean["date"], 
+                                    errors='coerce').dt.month
+
+# Drop rows where date conversion failed
+df_clean = df_clean.dropna(subset=["year", "month"])
+
+print("✅ Clean data shape:", df_clean.shape)
+print("✅ Any NaN left:", df_clean.isnull().sum().sum())
+
+# Select features and target
+X = df_clean[["latitude", "longitude", "depth", "year", "month"]]
+y = df_clean["magnitude"]
+
+# Train-test split
+X_train, X_test, y_train, y_test = train_test_split(
+                        X, y, test_size=0.2, random_state=42)
+
+# Normalize
+scaler = StandardScaler()
+X_train = scaler.fit_transform(X_train)
+X_test = scaler.transform(X_test)
+
+# ✅ FIX 3: Check for NaN after scaling
+print("✅ NaN in X_train:", np.isnan(X_train).sum())
+print("✅ NaN in y_train:", np.isnan(y_train.values).sum())
+
+# Define neural network
+model = Sequential([
+    Dense(64, activation='relu', 
+          input_shape=(X_train.shape[1],)),
+    Dense(64, activation='relu'),
+    Dense(1)  # output: predicted magnitude
+])
+
+# Compile model
+model.compile(optimizer='adam', loss='mse', metrics=['mae'])
+
+# ✅ FIX 4: Train with more epochs
+history = model.fit(X_train, y_train,
+                    validation_data=(X_test, y_test),
+                    epochs=50,
+                    batch_size=256,
+                    verbose=1)# Step 7: Training loss visualization (FIXED)
+import matplotlib.pyplot as plt
+
+loss = history.history['loss']
+val_loss = history.history['val_loss']
+
+print("✅ Training Loss sample:", loss[:5])
+print("✅ Validation Loss sample:", val_loss[:5])
+
+epochs_range = range(1, len(loss) + 1)
+
+plt.figure(figsize=(10, 6))
+plt.plot(epochs_range, loss, 
+         'bo-', label='Training Loss', 
+         linewidth=2, markersize=5)
+plt.plot(epochs_range, val_loss, 
+         'ro-', label='Validation Loss', 
+         linewidth=2, markersize=5)
+plt.title("Model Training Loss")
+plt.xlabel("Epoch")
+plt.ylabel("Loss (MSE)")
+plt.legend()
+plt.grid(True)
+plt.show()import folium
+from folium.plugins import HeatMap
+
+sample_df = df.sample(40000, random_state=42)
+heat_data = [[row["latitude"], row["longitude"], row["magnitudo"]] for _, row in sample_df.iterrows()]
+
+heat_map = folium.Map(location=[0,0], zoom_start=2, tiles="CartoDB dark_matter")
+HeatMap(heat_data, radius=6, blur=5, min_opacity=0.3).add_to(heat_map)
+heat_mapfeatures = ["latitude", "longitude", "depth", "year", "month"]
+X = df_clean[features].fillna(0)
+y = df_clean["magnitude"]
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+scaler = StandardScaler()
+X_train = scaler.fit_transform(X_train)
+X_test = scaler.transform(X_test)# Step 8: Evaluate the model
+loss, mae = model.evaluate(X_test, y_test)
+print(f"Test MAE (Mean Absolute Error): {mae:.4f}")
+plt.figure(figsize=(10,5))
+sns.countplot(x="year", data=df_clean[df_clean["year"].notna()].astype({"year": int}))
+plt.title("Number of Earthquakes per Year (1990-2023)")
+plt.xticks(rotation=45)
+plt.xlabel("Year")
+plt.ylabel("Count")
+plt.show()import joblib, os
+os.makedirs("models", exist_ok=True)
+joblib.dump(rfr, "models/rf_regressor.pkl")
+joblib.dump(rfc, "models/rf_classifier.pkl")
+joblib.dump(scaler, "models/scaler.pkl")
+model_df.to_csv("models/modeling_sample.csv", index=False)
+print("Saved models and sample to /content/models/")
